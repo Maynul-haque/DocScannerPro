@@ -33,22 +33,39 @@ class QuadStreamAnalyzer(
     /** A corner jump beyond this distance means the scene changed: snap instead of smooth. */
     private val jumpResetDistance: Float = 0.11f,
     /** Mean corner movement above this resets the hold clock (document is moving). */
-    private val movementResetDistance: Float = 0.022f
+    private val movementResetDistance: Float = 0.022f,
+    /** How long a dropout (lost/gate-failed frames) is tolerated before a full reset. */
+    private val dropoutGraceMs: Long = 400L
 ) {
     private var smoothed: QuadCorners? = null
     private var lastRaw: QuadCorners? = null
     private var holdStartMs: Long = -1L
     private var lastTriggerMs: Long = Long.MIN_VALUE / 2
+    private var dropoutStartMs: Long = -1L
+    private var lastProgress: Float = 0f
 
     fun process(raw: QuadCorners?, gatesOk: Boolean, nowMs: Long): QuadStreamResult {
         val previousRaw = lastRaw
-        lastRaw = raw
-        if (raw == null || !gatesOk) {
+        val active = raw != null && gatesOk
+        if (!active) {
+            // A one-or-two-frame dropout must not reset the tracker: keep the last
+            // good quad on screen and freeze the countdown while it lasts.
+            val hold = smoothed
+            if (hold != null) {
+                if (dropoutStartMs < 0L) dropoutStartMs = nowMs
+                if (nowMs - dropoutStartMs <= dropoutGraceMs) {
+                    return QuadStreamResult(hold, true, QuadStreamStatus.DETECTED, lastProgress, false)
+                }
+            }
+            dropoutStartMs = -1L
             holdStartMs = -1L
             smoothed = raw ?: smoothed
+            lastProgress = 0f
             val corners = smoothed ?: QuadCorners.defaultQuad(1f, 1f)
             return QuadStreamResult(corners, false, QuadStreamStatus.SEARCHING, 0f, false)
         }
+        dropoutStartMs = -1L
+        lastRaw = raw
         val prev = smoothed
         val next = when {
             prev == null -> raw
@@ -64,6 +81,7 @@ class QuadStreamAnalyzer(
         val progress = (held.toFloat() / minHoldMs).coerceIn(0f, 1f)
         val shouldTrigger = held >= minHoldMs && nowMs - lastTriggerMs >= minTriggerIntervalMs
         if (shouldTrigger) lastTriggerMs = nowMs
+        lastProgress = progress
         val status = if (progress >= 0.75f) QuadStreamStatus.ABOUT_TO_TRIGGER
             else QuadStreamStatus.DETECTED
         return QuadStreamResult(next, true, status, progress, shouldTrigger)
@@ -74,6 +92,8 @@ class QuadStreamAnalyzer(
         lastRaw = null
         holdStartMs = -1L
         lastTriggerMs = Long.MIN_VALUE / 2
+        dropoutStartMs = -1L
+        lastProgress = 0f
     }
 
     private fun lerpQuad(a: QuadCorners, b: QuadCorners, t: Float): QuadCorners = QuadCorners(

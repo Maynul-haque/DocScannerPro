@@ -16,3 +16,8 @@
 local.properties
 .env
 debug.keystore
+dist/
+build-*.log
+*.keystore
+KEYSTORE_INFO.txt
+*.idsig

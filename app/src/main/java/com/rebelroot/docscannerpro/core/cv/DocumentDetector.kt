@@ -29,6 +29,11 @@ class DocumentDetector {
     private var previousCorners: QuadCorners? = null
     private var stableFrameCount = 0
     private val requiredStableFrames = 5
+    // Persistence: keep the last good quad for a few frames when the contour
+    // search fails, so the outline does not flicker away and back.
+    private var lastGoodQuad: QuadCorners? = null
+    private var droppedFrames = 0
+    private val maxDroppedFrames = 7
     fun analyze(bitmap: Bitmap, aspectRatioHint: Float? = null): DetectionResult {
         val width = bitmap.width
         val height = bitmap.height
@@ -40,9 +45,16 @@ class DocumentDetector {
         val isLowLight = avgLum < 42
         val isBlurry = sharpnessMetric < 30.0
         val detection = findDocumentQuad(bitmap, aspectRatioHint)
-        val detected = detection?.corners ?: guideQuad(aspectRatioHint)
-        val hasRealDetection = detection != null
-        val isStable = if (hasRealDetection) checkStability(detected) else false
+        val persisted = detection ?: lastGoodQuad
+            ?.takeIf { droppedFrames < maxDroppedFrames }
+            ?.let { droppedFrames++; QuadDetection(it, 0.5f) }
+        if (detection != null) {
+            lastGoodQuad = detection.corners
+            droppedFrames = 0
+        }
+        val detected = persisted?.corners ?: guideQuad(aspectRatioHint)
+        val hasRealDetection = persisted != null
+        val isStable = if (detection != null) checkStability(detected) else false
         if (isStable) stableFrameCount++ else stableFrameCount = max(0, stableFrameCount - 1)
         previousCorners = detected
         val areaRatio = calculateAreaRatio(detected)
@@ -67,7 +79,7 @@ class DocumentDetector {
             stableFrameCount >= 3 -> 0.96f
             else -> 0.82f
         }
-        val ready = hasRealDetection && !isBlurry && !isLowLight && !isTooFar && !isOffCenter &&
+        val ready = detection != null && !isBlurry && !isLowLight && !isTooFar && !isOffCenter &&
             stableFrameCount >= requiredStableFrames
         return DetectionResult(
             corners = detected,
@@ -108,37 +120,25 @@ class DocumentDetector {
             Imgproc.cvtColor(src, gray, Imgproc.COLOR_RGBA2GRAY)
             Imgproc.GaussianBlur(gray, blurred, Size(5.0, 5.0), 0.0)
             val median = medianLuminance(pixels)
-            val lowT = (median * 0.66).coerceIn(30.0, 90.0)
-            val highT = (median * 1.40).coerceIn(80.0, 240.0)
+            val lowT = (median * 0.70).coerceIn(35.0, 100.0)
+            val highT = (median * 1.50).coerceIn(95.0, 250.0)
             Imgproc.Canny(blurred, edges, lowT, highT)
             Imgproc.dilate(edges, dilated, Mat(), Point(-1.0, -1.0), 1)
             val contours = ArrayList<MatOfPoint>()
             Imgproc.findContours(dilated, contours, Mat(), Imgproc.RETR_LIST, Imgproc.CHAIN_APPROX_SIMPLE)
-            var best: QuadCandidate? = null
             val imageArea = w.toDouble() * h.toDouble()
-            for (contour in contours) {
-                val area = abs(Imgproc.contourArea(contour))
-                if (area < imageArea * 0.10 || area > imageArea * 0.94) {
-                    contour.release()
-                    continue
+            var best: QuadCandidate? = null
+            try {
+                // Pass 1: strict convex 4-point quads.
+                best = pickBestQuad(contours, w, h, imageArea, aspectRatioHint,
+                    requireConvex = true, minArea = 0.10, maxArea = 0.94, epsilonScale = 0.025)
+                // Pass 2: relaxed matching so one imperfect frame does not drop the quad.
+                if (best == null) {
+                    best = pickBestQuad(contours, w, h, imageArea, aspectRatioHint,
+                        requireConvex = false, minArea = 0.08, maxArea = 0.95, epsilonScale = 0.035)
                 }
-                val curve = MatOfPoint2f(*contour.toArray())
-                val perimeter = Imgproc.arcLength(curve, true)
-                val approx = MatOfPoint2f()
-                Imgproc.approxPolyDP(curve, approx, 0.025 * perimeter, true)
-                val pts = approx.toArray()
-                if (pts.size == 4 && Imgproc.isContourConvex(MatOfPoint(*pts))) {
-                    val corners = orderAndNormalize(pts, w, h)
-                    val ratio = aspectRatio(corners)
-                    val ratioScore = aspectRatioHint?.let { 1f - (abs(ratio - it) / max(it, 0.01f)).coerceAtMost(1f) } ?: 1f
-                    val rectangularity = area / max(polygonArea(pts), 1.0)
-                    val centerPenalty = distanceFromCenter(corners) * 0.5f
-                    val score = (area / imageArea).toFloat() * 0.75f + ratioScore * 0.18f + rectangularity.toFloat() * 0.12f - centerPenalty
-                    if (best == null || score > best!!.score) best = QuadCandidate(corners, score)
-                }
-                approx.release()
-                curve.release()
-                contour.release()
+            } finally {
+                for (contour in contours) contour.release()
             }
             return best?.let { QuadDetection(it.corners, it.score) }
         } finally {
@@ -172,6 +172,40 @@ class DocumentDetector {
         }
         if (small !== bitmap) small.recycle()
         return (if (n == 0) 128 else (total / n).toInt()) to (edgeVariance / max(1, n - h)).coerceAtLeast(0.0)
+    }
+    private fun pickBestQuad(
+        contours: ArrayList<MatOfPoint>,
+        w: Int,
+        h: Int,
+        imageArea: Double,
+        aspectRatioHint: Float?,
+        requireConvex: Boolean,
+        minArea: Double,
+        maxArea: Double,
+        epsilonScale: Double
+    ): QuadCandidate? {
+        var best: QuadCandidate? = null
+        for (contour in contours) {
+            val area = abs(Imgproc.contourArea(contour))
+            if (area < imageArea * minArea || area > imageArea * maxArea) continue
+            val curve = MatOfPoint2f(*contour.toArray())
+            val perimeter = Imgproc.arcLength(curve, true)
+            val approx = MatOfPoint2f()
+            Imgproc.approxPolyDP(curve, approx, epsilonScale * perimeter, true)
+            val pts = approx.toArray()
+            if (pts.size == 4 && (!requireConvex || Imgproc.isContourConvex(MatOfPoint(*pts)))) {
+                val corners = orderAndNormalize(pts, w, h)
+                val ratio = aspectRatio(corners)
+                val ratioScore = aspectRatioHint?.let { 1f - (abs(ratio - it) / max(it, 0.01f)).coerceAtMost(1f) } ?: 1f
+                val rectangularity = area / max(polygonArea(pts), 1.0)
+                val centerPenalty = distanceFromCenter(corners) * 0.5f
+                val score = (area / imageArea).toFloat() * 0.75f + ratioScore * 0.18f + rectangularity.toFloat() * 0.12f - centerPenalty
+                if (best == null || score > best.score) best = QuadCandidate(corners, score)
+            }
+            approx.release()
+            curve.release()
+        }
+        return best
     }
     private fun medianLuminance(pixels: IntArray): Double {
         val hist = IntArray(256)
@@ -261,6 +295,8 @@ class DocumentDetector {
     fun reset() {
         previousCorners = null
         stableFrameCount = 0
+        lastGoodQuad = null
+        droppedFrames = 0
     }
     private data class QuadCandidate(val corners: QuadCorners, val score: Float)
     private data class QuadDetection(val corners: QuadCorners, val confidence: Float)

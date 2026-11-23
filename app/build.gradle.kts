@@ -11,7 +11,7 @@ android {
     minSdk = 24
     targetSdk = 36
     versionCode = 2
-    versionName = "1.1-lite1"
+    versionName = "1.1-lite2"
     missingDimensionStrategy("parallelization", "standard")
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
