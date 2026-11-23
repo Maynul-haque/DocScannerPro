@@ -16,6 +16,7 @@ import com.rebelroot.docscannerpro.core.cv.FileStorageManager
 import com.rebelroot.docscannerpro.core.cv.ImageEnhancer
 import com.rebelroot.docscannerpro.core.cv.PageFingerprint
 import com.rebelroot.docscannerpro.core.cv.PerspectiveTransformer
+import com.rebelroot.docscannerpro.core.cv.QuadStreamAnalyzer
 import com.rebelroot.docscannerpro.core.cv.BookScanner
 import com.rebelroot.docscannerpro.core.database.AppDatabase
 import com.rebelroot.docscannerpro.core.database.DocumentRepository
@@ -104,6 +105,7 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = DocumentRepository(AppDatabase.getInstance(application))
     private val storageManager = FileStorageManager(application)
     private val detector = DocumentDetector()
+    private val quadStream = QuadStreamAnalyzer()
     private val barcodeEngine = BarcodeEngine()
     private val bookScanner = BookScanner()
     private val qrHistoryStore = QrHistoryStore(application)
@@ -128,6 +130,7 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
     val hasRealDetection = MutableStateFlow(false)
     val guidanceMessage = MutableStateFlow("Point camera at document")
     val isStableAndReady = MutableStateFlow(false)
+    val autoCaptureProgress = MutableStateFlow(0f)
     val isBlurry = MutableStateFlow(false)
     val isLowLight = MutableStateFlow(false)
     val scannerStatus = MutableStateFlow<ScannerStatus>(ScannerStatus.Starting)
@@ -192,6 +195,7 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
         lastCapturedFingerprint = null
         lastQrRawValue = null
         detector.reset()
+        quadStream.reset()
         hasRealDetection.value = false
         guidanceMessage.value = when (mode) {
             ScanMode.ID_CARD -> "Align ID card inside rectangle"
@@ -233,14 +237,21 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
         }
         val result = detector.analyze(bitmap, aspectHint)
         analyzedFrameSize.value = FrameSize(bitmap.width, bitmap.height)
-        detectedCorners.value = result.corners
+        // Genius Scan-style quad stream: temporal smoothing + hold-to-trigger.
+        val streamGates = result.hasRealDetection && !result.isBlurry && !result.isLowLight &&
+            !result.isTooFar && !result.isOffCenter
+        val stream = quadStream.process(result.corners, streamGates, System.currentTimeMillis())
+        detectedCorners.value = stream.corners
         hasRealDetection.value = result.hasRealDetection
         guidanceMessage.value = result.guidanceText
-        isStableAndReady.value = result.readyForAutoCapture
+        isStableAndReady.value = stream.hasRealDetection && result.readyForAutoCapture
         isBlurry.value = result.isBlurry
         isLowLight.value = result.isLowLight
+        autoCaptureProgress.value =
+            if (isAutoCaptureEnabled.value && result.readyForAutoCapture) stream.triggerProgress else 0f
         if (isAutoCaptureEnabled.value &&
             result.readyForAutoCapture &&
+            stream.shouldTrigger &&
             editingPage.value == null &&
             captureState.value == CaptureState.Idle
         ) {
@@ -352,6 +363,7 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
                         guidanceMessage.value = "Page captured • keep going or tap Done"
                     }
                     detector.reset()
+                    quadStream.reset()
                     captureState.value = CaptureState.Idle
                     isProcessing.value = false
                 }
@@ -383,6 +395,7 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
             capturedPages.value = capturedPages.value + drafts
             editingPage.value = null
             detector.reset()
+            quadStream.reset()
             lastCapturedFingerprint = fingerprintOf(frame)
             guidanceMessage.value = "Spread captured • turn the page"
             captureState.value = CaptureState.Idle

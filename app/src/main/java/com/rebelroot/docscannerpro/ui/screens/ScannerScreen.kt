@@ -132,6 +132,7 @@ fun ScannerScreen(
     val isSaving by viewModel.isSaving.collectAsState()
     val savingPage by viewModel.savingPage.collectAsState()
     val savingTotalPages by viewModel.savingTotalPages.collectAsState()
+    val autoCaptureProgress by viewModel.autoCaptureProgress.collectAsState()
 
     var imageCapture: ImageCapture? by remember { mutableStateOf(null) }
     var cameraControl: androidx.camera.core.CameraControl? by remember { mutableStateOf(null) }
@@ -571,6 +572,15 @@ fun ScannerScreen(
                                 color = if (isStable) Color(0xFF5AA7FF) else Color.White.copy(alpha = 0.88f),
                                 style = Stroke(width = 3.5.dp.toPx())
                             )
+                            if (isAutoCapture && autoCaptureProgress > 0.02f) {
+                                drawArc(
+                                    color = Color(0xFF43A047),
+                                    startAngle = -90f,
+                                    sweepAngle = 360f * autoCaptureProgress.coerceIn(0f, 1f),
+                                    useCenter = false,
+                                    style = Stroke(width = 4.dp.toPx(), cap = StrokeCap.Round)
+                                )
+                            }
                         }
                         Surface(
                             shape = CircleShape,

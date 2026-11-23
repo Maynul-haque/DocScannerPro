@@ -7,11 +7,11 @@ android {
   namespace = "com.rebelroot.docscannerpro"
   compileSdk = 36
   defaultConfig {
-    applicationId = "com.rebelroot.docscannerpro"
+    applicationId = "com.rebelroot.docscannerpro.lite"
     minSdk = 24
     targetSdk = 36
     versionCode = 2
-    versionName = "1.1"
+    versionName = "1.1-lite1"
     missingDimensionStrategy("parallelization", "standard")
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

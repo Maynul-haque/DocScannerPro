@@ -21,7 +21,9 @@ data class DetectionResult(
     val isStable: Boolean,
     val guidanceText: String,
     val readyForAutoCapture: Boolean,
-    val hasRealDetection: Boolean
+    val hasRealDetection: Boolean,
+    val isTooFar: Boolean = false,
+    val isOffCenter: Boolean = false
 )
 class DocumentDetector {
     private var previousCorners: QuadCorners? = null
@@ -75,7 +77,9 @@ class DocumentDetector {
             isStable = ready,
             guidanceText = guidanceText,
             readyForAutoCapture = ready,
-            hasRealDetection = hasRealDetection
+            hasRealDetection = hasRealDetection,
+            isTooFar = isTooFar,
+            isOffCenter = isOffCenter
         )
     }
     private fun findDocumentQuad(bitmap: Bitmap, aspectRatioHint: Float?): QuadDetection? {
@@ -103,7 +107,10 @@ class DocumentDetector {
             src.put(0, 0, rgba)
             Imgproc.cvtColor(src, gray, Imgproc.COLOR_RGBA2GRAY)
             Imgproc.GaussianBlur(gray, blurred, Size(5.0, 5.0), 0.0)
-            Imgproc.Canny(blurred, edges, 55.0, 165.0)
+            val median = medianLuminance(pixels)
+            val lowT = (median * 0.66).coerceIn(30.0, 90.0)
+            val highT = (median * 1.40).coerceIn(80.0, 240.0)
+            Imgproc.Canny(blurred, edges, lowT, highT)
             Imgproc.dilate(edges, dilated, Mat(), Point(-1.0, -1.0), 1)
             val contours = ArrayList<MatOfPoint>()
             Imgproc.findContours(dilated, contours, Mat(), Imgproc.RETR_LIST, Imgproc.CHAIN_APPROX_SIMPLE)
@@ -165,6 +172,25 @@ class DocumentDetector {
         }
         if (small !== bitmap) small.recycle()
         return (if (n == 0) 128 else (total / n).toInt()) to (edgeVariance / max(1, n - h)).coerceAtLeast(0.0)
+    }
+    private fun medianLuminance(pixels: IntArray): Double {
+        val hist = IntArray(256)
+        var i = 0
+        var n = 0
+        while (i < pixels.size) {
+            val p = pixels[i]
+            val lum = (0.299 * ((p shr 16) and 255) + 0.587 * ((p shr 8) and 255) + 0.114 * (p and 255)).toInt()
+            hist[lum.coerceIn(0, 255)]++
+            n++
+            i += 3
+        }
+        if (n == 0) return 128.0
+        var acc = 0
+        for (v in 0 until 256) {
+            acc += hist[v]
+            if (acc >= n / 2) return v.toDouble()
+        }
+        return 128.0
     }
     private fun guideQuad(aspectRatioHint: Float?): QuadCorners {
         val insetX = 0.08f
