@@ -10,8 +10,8 @@ android {
     applicationId = "com.rebelroot.docscannerpro.lite"
     minSdk = 24
     targetSdk = 36
-    versionCode = 2
-    versionName = "1.1-lite2"
+    versionCode = 3
+    versionName = "1.2-lite1"
     missingDimensionStrategy("parallelization", "standard")
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -70,6 +70,7 @@ dependencies {
   implementation(libs.androidx.room.runtime)
   implementation(libs.coil.compose)
   implementation(libs.zxing.core)
+  implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0")
   implementation(libs.opencv)
   implementation(libs.pdfbox.android)
   implementation(libs.androidx.exifinterface)

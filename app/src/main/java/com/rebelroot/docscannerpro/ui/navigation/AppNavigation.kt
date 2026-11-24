@@ -1,8 +1,10 @@
 package com.rebelroot.docscannerpro.ui.navigation
 import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -50,6 +52,9 @@ import com.rebelroot.docscannerpro.ui.screens.SettingsScreen
 import com.rebelroot.docscannerpro.ui.viewmodel.DocumentViewModel
 import com.rebelroot.docscannerpro.ui.viewmodel.ScanMode
 import com.rebelroot.docscannerpro.ui.viewmodel.ScanViewModel
+import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 sealed class Screen(val route: String) {
     data object Home : Screen("home")
     data object Scanner : Screen("scanner/{mode}") {
@@ -97,7 +102,7 @@ fun AppNavigation(
             navController.navigate(Screen.Scanner.createRoute(pendingScanMode))
         }
     }
-    fun startScanning(mode: ScanMode) {
+    fun legacyScan(mode: ScanMode) {
         pendingScanMode = mode
         if (hasCameraPermission) {
             scanViewModel.setScanMode(mode)
@@ -107,12 +112,6 @@ fun AppNavigation(
         }
     }
 
-    androidx.compose.runtime.LaunchedEffect(quickMode) {
-        if (quickMode != null) {
-            startScanning(quickMode)
-            onQuickModeConsumed()
-        }
-    }
     fun importImages(uris: List<Uri>) {
         if (uris.isEmpty()) return
         // Switch mode and enter the scanner FIRST: setScanMode() resets the
@@ -138,6 +137,48 @@ fun AppNavigation(
                 scanViewModel.editPage(drafts.first())
                 navController.navigate(Screen.ManualCrop.route)
             }
+        }
+    }
+    val mlKitScanLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            result.data?.let { intent ->
+                val scanResult = GmsDocumentScanningResult.fromActivityResultIntent(intent)
+                val uris = scanResult?.pages?.mapNotNull { it.imageUri } ?: emptyList()
+                if (uris.isNotEmpty()) importImages(uris)
+            }
+        }
+    }
+
+    fun startMlKitScan() {
+        val activity = context as? Activity
+        if (activity == null) {
+            legacyScan(ScanMode.DOCUMENT)
+            return
+        }
+        val options = GmsDocumentScannerOptions.Builder()
+            .setGalleryImportAllowed(true)
+            .setPageLimit(30)
+            .setResultFormats(GmsDocumentScannerOptions.RESULT_FORMAT_JPEG)
+            .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
+            .build()
+        val scanner = GmsDocumentScanning.getClient(options)
+        scanner.getStartScanIntent(activity)
+            .addOnSuccessListener { sender ->
+                mlKitScanLauncher.launch(IntentSenderRequest.Builder(sender).build())
+            }
+            .addOnFailureListener { legacyScan(ScanMode.DOCUMENT) }
+    }
+
+    fun startScanning(mode: ScanMode) {
+        if (mode == ScanMode.DOCUMENT) startMlKitScan() else legacyScan(mode)
+    }
+
+    androidx.compose.runtime.LaunchedEffect(quickMode) {
+        if (quickMode != null) {
+            startScanning(quickMode)
+            onQuickModeConsumed()
         }
     }
     NavHost(
